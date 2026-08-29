@@ -13,7 +13,7 @@
     {                        \
         if (err < 0)         \
         {                    \
-            PF_PrintError(); \
+            PF_PrintError("dblayer error"); \
             exit(1);         \
         }                    \
     }
@@ -89,7 +89,7 @@ loadCSV()
     char *tokens[MAX_TOKENS];
     char record[MAX_PAGE_SIZE];
 
-    err = AM_CreateIndex(INDEX_NAME, 0, 'i', sizeof(int));
+    err = AM_CreateIndex(DB_NAME, 0, 'i', sizeof(int));
     checkerr(err);
 
     int indexFD = PF_OpenFile(INDEX_NAME);
@@ -111,8 +111,7 @@ loadCSV()
         int population = atoi(tokens[2]);
 
         // Use the population field as the field to index on
-        AM_InsertEntry(indexFD, 'i', sizeof(int), (char *)&population, rid);
-
+        err = AM_InsertEntry(indexFD, 'i', sizeof(int), (char *)&population, rid);
         checkerr(err);
     }
     fclose(fp);

@@ -9,7 +9,7 @@
     {                        \
         if (err < 0)         \
         {                    \
-            PF_PrintError(); \
+            PF_PrintError("dblayer error"); \
             exit(1);         \
         }                    \
     }
@@ -25,7 +25,7 @@ void printRow(void *callbackObj, RecId rid, byte *row, int len)
 
         if (columnIndex > 0)
         {
-            printf(", ");
+            printf(",");
         }
         switch (col->type)
         {
