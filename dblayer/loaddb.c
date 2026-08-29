@@ -51,7 +51,7 @@ int encode(Schema *sch, char **fields, byte *record, int spaceLeft)
         totalBytesEncoded += bytesEncoded;
     }
     return totalBytesEncoded;
-    
+
     // for each field
     //    switch corresponding schema type is
     //        VARCHAR : EncodeCString
@@ -83,10 +83,17 @@ loadCSV()
     Schema *sch = parseSchema(line);
     Table *tbl;
 
-    Table_Open(DB_NAME, sch, TRUE, &tbl);
+    int err = Table_Open(DB_NAME, sch, TRUE, &tbl);
+    checkerr(err);
 
     char *tokens[MAX_TOKENS];
     char record[MAX_PAGE_SIZE];
+
+    err = AM_CreateIndex(INDEX_NAME, 0, 'i', sizeof(int));
+    checkerr(err);
+
+    int indexFD = PF_OpenFile(INDEX_NAME);
+    checkerr(indexFD);
 
     while ((line = fgets(buf, MAX_LINE_LEN, fp)) != NULL)
     {
@@ -95,15 +102,16 @@ loadCSV()
         int len = encode(sch, tokens, record, sizeof(record));
         RecId rid;
 
-        Table_Insert(tbl, record, len, &rid);
+        err = Table_Insert(tbl, record, len, &rid);
+        checkerr(err);
 
         printf("%d %s\n", rid, tokens[0]);
 
         // Indexing on the population column
         int population = atoi(tokens[2]);
 
-        UNIMPLEMENTED;
         // Use the population field as the field to index on
+        AM_InsertEntry(indexFD, 'i', sizeof(int), (char *)&population, rid);
 
         checkerr(err);
     }
