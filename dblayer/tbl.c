@@ -175,7 +175,7 @@ Table_Get(Table *tbl, RecId rid, byte *record, int maxlen) {
     int slot = rid & 0xFFFF;
     int pageNum = rid >> 16;
     char * pageBuf;
-    
+
         // PF_GetThisPage(pageNum)
     int err = PF_GetThisPage(tbl->fd, pageNum, &pageBuf);
     checkerr(err);
@@ -198,8 +198,26 @@ Table_Get(Table *tbl, RecId rid, byte *record, int maxlen) {
 void
 Table_Scan(Table *tbl, void *callbackObj, ReadFunc callbackfn) {
 
-    UNIMPLEMENTED;
+    int pageNum , err , slot , numSlots , offset , len;
+    char * pageBuf;
+    RecId rid;
 
+    err = PF_GetFirstPage(tbl->fd, &pageNum, &pageBuf);
+    while(err == PFE_OK) {
+        numSlots = getNumSlots((byte *)pageBuf);
+        for(slot = 0; slot < numSlots; slot++) {
+            offset = getNthSlotOffset(slot, pageBuf);
+            len = getLen(slot, (byte *)pageBuf);
+            rid = (pageNum << 16) | slot;
+            callbackfn(callbackObj, rid, (byte *)(pageBuf + offset), len);
+        }
+        err = PF_UnfixPage(tbl->fd, pageNum, FALSE);
+        checkerr(err);
+        err = PF_GetNextPage(tbl->fd, &pageNum, &pageBuf);
+    }
+    if(err != PFE_EOF) {
+        checkerr(err);
+    }
     // For each page obtained using PF_GetFirstPage and PF_GetNextPage
     //    for each record in that page,
     //          callbackfn(callbackObj, rid, record, recordLen)
