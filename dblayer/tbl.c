@@ -7,7 +7,11 @@
 #include "codec.h"
 #include "../pflayer/pf.h"
 
+#define FREE_SPACE_OFFSET 0
 #define SLOT_COUNT_OFFSET 2
+#define SLOT_ARRAY_OFFSET 4
+#define SLOT_ENTRY_SIZE 4
+
 #define checkerr(err) {if (err < 0) {PF_PrintError(); exit(EXIT_FAILURE);}}
 
 int  getLen(int slot, byte *pageBuf);
@@ -15,6 +19,46 @@ int  getNumSlots(byte *pageBuf);
 void setNumSlots(byte *pageBuf, int nslots);
 int  getNthSlotOffset(int slot, char* pageBuf);
 
+
+int getLen(int slot, byte *pageBuf){
+    int addrOfSlotEntry = SLOT_ARRAY_OFFSET + slot * SLOT_ENTRY_SIZE;
+    int addrOfSlotEntryLen = addrOfSlotEntry + 2;
+    return (int)DecodeShort((byte *)(pageBuf + addrOfSlotEntryLen));
+}
+
+int getNumSlots(byte* pageBuf){
+    return (int)DecodeShort((byte *)(pageBuf + SLOT_COUNT_OFFSET));
+}
+
+void setNumSlots(byte* pageBuf, int nslots){
+    EncodeShort((short)nslots, (byte *)(pageBuf + SLOT_COUNT_OFFSET));
+}
+
+int getNthSlotOffset(int slot, char* pageBuf){
+    int addrOfSlotEntry = SLOT_ARRAY_OFFSET + slot * SLOT_ENTRY_SIZE;
+    return (int)DecodeShort((byte *)(pageBuf + addrOfSlotEntry));
+}
+
+//Extra helper functions to get free space pointer, set free space pointer, set Nth Slot offset , set Nth slot length , page header init
+
+int getFreeSpacePtr(byte *pagebuf){
+    return (int)DecodeShort((byte *)(pagebuf + FREE_SPACE_OFFSET));
+}
+
+void setFreeSpacePtr(byte * pagebuf, int freeSpacePtr){
+    EncodeShort((short)freeSpacePtr, (byte *)(pagebuf + FREE_SPACE_OFFSET));
+}
+
+void setLen(int slot, byte *pagebuf, int len){
+    int addrOfSlotEntry = SLOT_ARRAY_OFFSET + slot * SLOT_ENTRY_SIZE;
+    int addrOfSlotEntryLen = addrOfSlotEntry + 2;
+    EncodeShort((short)len, (byte *)(pagebuf + addrOfSlotEntryLen));
+}
+
+void initPageHeader(byte* pageBuf){
+    setNumSlots(pageBuf, 0);
+    setFreeSpacePtr(pageBuf, PF_PAGE_SIZE);
+}
 
 /**
    Opens a paged file, creating one if it doesn't exist, and optionally
@@ -33,10 +77,8 @@ Table_Open(char *dbname, Schema *schema, bool overwrite, Table **ptable)
     }
 
     // Initialize PF, create PF file,
-
     error = PF_CreateFile(dbname);
     checkerr(error);
-
     fileDescriptor = PF_OpenFile(dbname);
     checkerr(fileDescriptor);
 
@@ -48,42 +90,81 @@ Table_Open(char *dbname, Schema *schema, bool overwrite, Table **ptable)
     // on record storage. 
     table->schema = schema;
     table->fd = fileDescriptor;
+    table->currPage = -1;
     *ptable = table;
 
     return 0;
-
 }
 
 void
 Table_Close(Table *tbl) {
-    int pageNum , error ;
-    char * pageBuffer;
 
-    //Unfix any dirty pages
-    error = PF_GetFirstPage(tbl->fd, &pageNum, &pageBuffer);
-    while(error == PFE_OK) {
-        checkerr(error);
-        error = PF_UnfixPage(tbl->fd, pageNum, true);
-        checkerr(error);
-        error = PF_GetNextPage(tbl->fd, &pageNum, &pageBuffer);
-    }
-
-    error = PF_CloseFile(tbl->fd);
+    int error = PF_CloseFile(tbl->fd);
     checkerr(error);
     free(tbl);
-    // close file.
+
 }
 
 
 int
 Table_Insert(Table *tbl, byte *record, int len, RecId *rid) {
+    int pageNum , err;
+    char * pageBuf;
+    int numSlots , freeSpacePtr , headerEnd , spaceNeeded , spaceAvailable , newDataStart;
+    bool needNewPage = TRUE;
+
+    if(tbl->currPage != -1) {
+        err = PF_GetThisPage(tbl->fd, tbl->currPage, &pageBuf);
+        checkerr(err);
+
+        numSlots = getNumSlots((byte *)pageBuf);
+        freeSpacePtr = getFreeSpacePtr((byte *)pageBuf);
+        headerEnd = SLOT_ARRAY_OFFSET + numSlots * SLOT_ENTRY_SIZE;
+        spaceNeeded = len + SLOT_ENTRY_SIZE;
+        spaceAvailable = freeSpacePtr - headerEnd;
+
+        if(spaceAvailable >= spaceNeeded && numSlots < 256*256) {
+            pageNum = tbl->currPage;
+            needNewPage = FALSE;
+        }
+        else{
+            err = PF_UnfixPage(tbl->fd, tbl->currPage, FALSE);
+            checkerr(err);
+        }
+
+    }
+
     // Allocate a fresh page if len is not enough for remaining space
+
+    if(needNewPage) {
+        err = PF_AllocPage(tbl->fd, &pageNum, &pageBuf);
+        checkerr(err);
+        initPageHeader((byte *)pageBuf);
+        numSlots = 0;
+        freeSpacePtr = PF_PAGE_SIZE;
+        tbl->currPage = pageNum;
+    }
+
+    newDataStart = freeSpacePtr - len;
+    memcpy(pageBuf + newDataStart, record, len);
+
+    setNthSlotOffset(numSlots, pageBuf, newDataStart);
+    setLen(numSlots, pageBuf, len);
+    setNumSlots(pageBuf, numSlots + 1);
+    setFreeSpacePtr(pageBuf, newDataStart);
+
+    *rid = (pageNum << 16) | numSlots;
+
+    err = PF_UnfixPage(tbl->fd, pageNum, TRUE);
+    checkerr(err);
+
+    return 0;
+
     // Get the next free slot on page, and copy record in the free
     // space
     // Update slot and free space index information on top of page.
 }
 
-#define checkerr(err) {if (err < 0) {PF_PrintError(); exit(EXIT_FAILURE);}}
 
 /*
   Given an rid, fill in the record (but at most maxlen bytes).
@@ -93,12 +174,24 @@ int
 Table_Get(Table *tbl, RecId rid, byte *record, int maxlen) {
     int slot = rid & 0xFFFF;
     int pageNum = rid >> 16;
+    char * pageBuf;
+    
+        // PF_GetThisPage(pageNum)
+    int err = PF_GetThisPage(tbl->fd, pageNum, &pageBuf);
+    checkerr(err);
 
-    UNIMPLEMENTED;
-    // PF_GetThisPage(pageNum)
-    // In the page get the slot offset of the record, and
-    // memcpy bytes into the record supplied.
-    // Unfix the page
+        // In the page get the slot offset of the record
+    int offset = getNthSlotOffset(slot, pageBuf);
+    int len = getLen(slot, (byte *)pageBuf);
+
+        // memcpy bytes into the record supplied.
+    len = min(len, maxlen);
+    memcpy(record, pageBuf + offset, len);
+
+      // Unfix the page
+    err = PF_UnfixPage(tbl->fd, pageNum, FALSE);
+    checkerr(err);
+  
     return len; // return size of record
 }
 

@@ -21,6 +21,7 @@ typedef struct {
 typedef struct {
     Schema *schema;
     int fd;
+    int currPage;
     // UNIMPLEMENTED; 
     
 } Table ;
